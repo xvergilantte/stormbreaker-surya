@@ -1,0 +1,155 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:  
+      branch:
+        description: 'Enter branch name'
+        required: true
+        default: 'main'
+        type: string
+      build_option:
+        description: 'Build option'
+        required: true
+        default: 'default'
+        type: string
+      ksu_option:
+        description: 'KernelSU option'
+        required: true
+        type: choice
+        options:
+          - none
+          - ksun-legacy
+          - ksun-susfs
+          - xxksu-legacy
+          - xxksu-susfs
+          - resukisu-main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Jakarta
+      KBUILD_BUILD_USER: v
+      KBUILD_BUILD_HOST: paradise
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Cache toolchain
+        uses: actions/cache@main
+        with:
+          path: tc
+          key: gcc-20210418
+
+      - name: Setup toolchain
+        run: |
+          if [ ! -d "tc" ]; then
+            echo "Toolchain not found !"
+            echo "Cloning toolchain later"
+          else
+            echo "Toolchain found !"
+            echo "Using cached toolchain"
+          fi
+
+      - name: Setup kernelsu
+        run: |
+          if [ -d "drivers/kernelsu" ]; then
+            echo "Using hardcoded KernelSU drivers"
+          else
+            case "${{ inputs.ksu_option }}" in
+              "none")
+                echo "No KernelSU"
+                ;;
+              "ksun-legacy")
+                echo "Setting up KernelSU-Next legacy..."
+                curl -LSs "https://raw.githubusercontent.com/xvergilantte/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy
+                ;;
+              "ksun-susfs")
+                echo "Setting up KernelSU-Next legacy-susfs..."
+                curl -LSs "https://raw.githubusercontent.com/xvergilantte/KernelSU-Next/legacy-susfs/kernel/setup.sh" | bash -s legacy-susfs
+                ;;
+              "xxksu-legacy")
+                echo "Setting up XXKernelSU legacy..."
+                curl -LSs "https://raw.githubusercontent.com/xvergilantte/KernelSU/legacy/kernel/setup.sh" | bash -s legacy
+                ;;
+              "xxksu-susfs")
+                echo "Setting up XXKernelSU legacy-susfs..."
+                curl -LSs "https://raw.githubusercontent.com/xvergilantte/KernelSU/legacy-susfs/kernel/setup.sh" | bash -s legacy-susfs
+                ;;
+              "resukisu-main")
+                echo "Setting up ReSukiSU..."
+                curl -LSs "https://raw.githubusercontent.com/xvergilantte/ReSukiSU/main/kernel/setup.sh" | bash -s main
+                ;;
+            esac
+          fi
+
+      - name: Record build start time
+        run: echo "BUILD_START_TIME=$(date +%s)" >> $GITHUB_ENV
+
+      - name: Building & save log
+        continue-on-error: true
+        run: |
+          BUILD_OPTION="${{ inputs.build_option }}"
+          if [ "$BUILD_OPTION" = "default" ]; then
+            bash build.sh
+          else
+            bash build.sh $BUILD_OPTION
+          fi
+
+      - name: Upload build & log artifact
+        uses: actions/upload-artifact@main
+        continue-on-error: true
+        with:
+          name: build-artifact
+          path: |
+            *.zip
+            buildlog.txt
+
+      - name: Calculate build script duration
+        run: |
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - BUILD_START_TIME))
+          MINUTES=$((DURATION / 60))
+          SECONDS=$((DURATION % 60))
+          echo "BUILD_DURATION=${MINUTES}m ${SECONDS}s" >> $GITHUB_ENV
+
+      - name: Create caption
+        run: |
+          BUILD_DATE="$(date '+%H:%M | %d/%m/%Y')"
+          COMMIT_MESSAGE=$(git log -1 --pretty=%s)
+          BRANCHNAME="$GITHUB_REF_NAME"
+          RUNNUMBER="${{ github.run_number }}"
+          COMMIT_HASH=$(git rev-parse HEAD)
+          COMMIT_URL="https://github.com/${{ github.repository }}/commit/$COMMIT_HASH"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          {
+          echo "${BUILD_DATE}"
+          echo "${{ env.BUILD_DURATION }}"
+          echo "${COMMIT_HASH:0:8}"
+          echo "Branch : ${BRANCHNAME}"
+          echo "#${RUNNUMBER}"
+          echo '```'
+          echo "${COMMIT_MESSAGE}"
+          echo '```'
+          echo "[Commit](${COMMIT_URL})"
+          echo "[Workflow run](${RUN_URL})"
+          } > caption.txt
+
+      - name: Upload log and kernel to Telegram
+        run: |
+          LOG=$(ls buildlog.txt)
+          STANDARD=$(ls Mjolnir-surya-*.zip)
+          curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
+          -F chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
+          -F document=@"${LOG}"
+          caption=$(<caption.txt)
+          curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
+          -F chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
+          -F document=@"${STANDARD}" \
+          -F parse_mode="Markdown" \
+          -F caption="${caption}"
